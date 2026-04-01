@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Geldstrom</title>
+    <link rel="stylesheet" href="styles.css">
+    <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+    <script src="plotly.min.js"></script>
+</head>
+<body>
+    <div class="app-shell">
+        <header class="app-header">
+            <h1>Geldstrom</h1>
+        </header>
+
+        <nav class="view-nav">
+            <button id="dashboardTabButton" class="view-nav-button active" data-view="dashboard">Dashboard</button>
+            <button id="categorizerTabButton" class="view-nav-button" data-view="categorizer">Upload</button>
+            <button id="rulesTabButton" class="view-nav-button" data-view="rules">Regeln</button>
+            <button id="filesTabButton" class="view-nav-button" data-view="files">Dateien</button>
+        </nav>
+
+        <main class="view-host">
+            <section id="dashboardView" class="view-panel active">
+                <div class="view-scroll">
+                    <section class="card filter-card">
+                        <div class="card-header">
+                            <h2>Filter</h2>
+                        </div>
+                        <div class="filter-grid">
+                            <label class="field">
+                                <span>Transaktionstext</span>
+                                <input id="filterInput" type="text" placeholder="Nach Text filtern...">
+                            </label>
+                            <label class="field">
+                                <span>Betrag</span>
+                                <input id="amountFilter" type="text" placeholder=">50, <20 oder 50">
+                            </label>
+                            <label class="field">
+                                <span>Kategorie</span>
+                                <div id="categoryFilter" class="custom-select" data-placeholder="Alle Kategorien"></div>
+                            </label>
+                            <label class="field date-field">
+                                <span>Startdatum</span>
+                                <div class="date-input-group">
+                                    <input id="dateStartFilter" type="text" inputmode="numeric" placeholder="tt.mm.jjjj" autocomplete="off">
+                                    <button id="dateStartFilterButton" type="button" class="date-picker-button" aria-label="Startdatum auswählen">Kalender</button>
+                                </div>
+                                <div id="dateStartFilterCalendar" class="date-picker-popover" hidden></div>
+                            </label>
+                            <label class="field date-field">
+                                <span>Enddatum</span>
+                                <div class="date-input-group">
+                                    <input id="dateEndFilter" type="text" inputmode="numeric" placeholder="tt.mm.jjjj" autocomplete="off">
+                                    <button id="dateEndFilterButton" type="button" class="date-picker-button" aria-label="Enddatum auswählen">Kalender</button>
+                                </div>
+                                <div id="dateEndFilterCalendar" class="date-picker-popover" hidden></div>
+                            </label>
+                            <div class="filter-actions">
+                                <button id="resetFiltersButton" class="secondary-button">Filter zurücksetzen</button>
+                            </div>
+                        </div>
+                    </section>
+
+                    <div id="dashboardStatus" class="status-strip success"></div>
+
+                    <section class="chart-grid">
+                        <article class="card chart-card">
+                            <div class="card-header">
+                                <h2>Ausgaben</h2>
+                            </div>
+                            <div class="chart-layout">
+                                <div id="expensesChart" class="chart-surface"></div>
+                                <div class="legend-panel">
+                                    <div id="expensesLegend" class="legend-list"></div>
+                                    <div class="chart-summary">
+                                        <strong id="expensesSum">0,00 €</strong>
+                                        <span id="expensesAverage">0,00 € / Monat</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </article>
+
+                        <article class="card chart-card">
+                            <div class="card-header">
+                                <h2>Einnahmen</h2>
+                            </div>
+                            <div class="chart-layout">
+                                <div id="incomeChart" class="chart-surface"></div>
+                                <div class="legend-panel">
+                                    <div id="incomeLegend" class="legend-list"></div>
+                                    <div class="chart-summary">
+                                        <strong id="incomeSum">0,00 €</strong>
+                                        <span id="incomeAverage">0,00 € / Monat</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </article>
+                    </section>
+
+                    <section class="card table-card">
+                        <div class="card-header">
+                            <h2>Transaktionen</h2>
+                        </div>
+                        <div class="table-wrapper">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th data-sort-column="Buchungstag">Datum</th>
+                                        <th data-sort-column="Betrag">Betrag</th>
+                                        <th data-sort-column="Kategorie">Kategorie</th>
+                                        <th data-sort-column="Debitor/Kreditor">Debitor/Kreditor</th>
+                                        <th data-sort-column="Text">Beschreibung</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="transactionsTableBody"></tbody>
+                            </table>
+                        </div>
+                    </section>
+                </div>
+            </section>
+
+            <section id="categorizerView" class="view-panel">
+                <div class="view-scroll">
+                    <section class="card upload-intro-card">
+                        <div class="card-header">
+                            <h2>CSV Upload & Verarbeitung</h2>
+                            <button id="startCategorizerUploadButton" class="primary-button">CSV-Datei auswählen</button>
+                        </div>
+                        <p class="upload-intro-text">
+                            Lade hier eine CSV-Datei wie bisher aus dem bisherigen Input-Workflow hoch. Unklare Transaktionen
+                            werden direkt in der Oberfläche geprüft, kategorisiert und danach als JSON in den Uploads gespeichert.
+                        </p>
+                        <div class="upload-meta-row">
+                            <div class="upload-meta-item">
+                                <span>Aktuelle Datei</span>
+                                <strong id="uploadSourceName">Noch keine Datei gewählt</strong>
+                            </div>
+                            <div class="upload-meta-item align-end">
+                                <span>Fortschritt</span>
+                                <strong id="uploadProgressPill" class="progress-pill">Bereit</strong>
+                            </div>
+                        </div>
+                    </section>
+
+                    <div id="uploadStatus" class="status-strip info"></div>
+
+                    <section id="uploadEmptyState" class="card empty-state-card">
+                        <h2>Kein aktiver Verarbeitungsvorgang</h2>
+                        <p>
+                            Wähle eine CSV-Datei aus, um die Categorizer-Logik in der Desktop-App zu starten. Bereits bekannte
+                            Regeln werden automatisch angewendet, nur offene Fälle werden dir zur Auswahl angezeigt.
+                        </p>
+                    </section>
+
+                    <section id="uploadWorkflowCard" class="card upload-workflow-card hidden">
+                        <div class="card-header">
+                            <div>
+                                <h2>Transaktion prüfen</h2>
+                                <p id="uploadWorkflowSummary" class="card-subtitle"></p>
+                            </div>
+                            <div class="workflow-actions">
+                                <button id="cancelUploadWorkflowButton" class="danger-button">Vorgang abbrechen</button>
+                                <button id="submitUploadDecisionButton" class="success-button">Kategorie übernehmen</button>
+                            </div>
+                        </div>
+
+                        <section class="upload-form-grid">
+                            <label class="field">
+                                <span>Bestehende Kategorie</span>
+                                <div id="uploadCategorySelect" class="custom-select" data-placeholder="Bestehende Kategorie auswählen"></div>
+                            </label>
+                            <label class="field">
+                                <span>Neue Kategorie</span>
+                                <input
+                                    id="uploadCategoryInput"
+                                    type="text"
+                                    placeholder="Optional neue Kategorie eingeben"
+                                >
+                            </label>
+                            <label class="field">
+                                <span>Ruleset-Name</span>
+                                <div id="uploadRulesetSelect" class="custom-select" data-placeholder="Ruleset auswählen"></div>
+                            </label>
+                        </section>
+
+                        <div class="upload-section-heading">Transaktionsdaten</div>
+
+                        <section class="upload-transaction-grid">
+                            <article class="upload-info-card">
+                                <span>Datum</span>
+                                <strong id="reviewBookingDate"></strong>
+                            </article>
+                            <article class="upload-info-card">
+                                <span>Betrag</span>
+                                <strong id="reviewAmount"></strong>
+                            </article>
+                            <article class="upload-info-card upload-info-card-wide">
+                                <span>Vorgeschlagene Kategorie</span>
+                                <strong id="reviewSuggestedCategory"></strong>
+                            </article>
+                        </section>
+
+                        <section class="upload-detail-grid">
+                            <article class="upload-detail-card">
+                                <span>Debitor/Kreditor</span>
+                                <strong id="reviewDebitor"></strong>
+                            </article>
+                            <article class="upload-detail-card">
+                                <span>Buchungstext</span>
+                                <p id="reviewBookingText"></p>
+                            </article>
+                            <article class="upload-detail-card upload-detail-card-wide">
+                                <span>Verwendungszweck</span>
+                                <p id="reviewPurpose"></p>
+                            </article>
+                            <article class="upload-detail-card upload-detail-card-wide">
+                                <span>Zusammengeführter Text</span>
+                                <p id="reviewText"></p>
+                            </article>
+                        </section>
+                    </section>
+                </div>
+            </section>
+
+            <section id="rulesView" class="view-panel">
+                <div class="view-scroll">
+                    <section class="card rules-card">
+                        <div class="card-header sticky-header">
+                            <div>
+                                <h2>Regeln bearbeiten</h2>
+                                <p class="card-subtitle">Hier kann die Datei learned_rules.json direkt bearbeitet werden.</p>
+                                <p id="rulesLocationHint" class="location-hint"></p>
+                            </div>
+                            <div class="workflow-actions">
+                                <button id="openRulesFolderButton" class="secondary-button">Regelordner öffnen</button>
+                                <button id="openDataFolderFromRulesButton" class="secondary-button">Datenordner öffnen</button>
+                                <button id="reloadRulesButton" class="secondary-button">Neu laden</button>
+                                <button id="saveRulesButton" class="primary-button">Regeln speichern</button>
+                            </div>
+                        </div>
+                        <div id="rulesStatus" class="status-strip info"></div>
+                        <textarea id="rulesEditor" spellcheck="false" placeholder="Regeln werden geladen..."></textarea>
+                    </section>
+                </div>
+            </section>
+
+            <section id="filesView" class="view-panel">
+                <div class="view-scroll">
+                    <section class="toolbar-row">
+                        <button id="uploadFileButton" class="primary-button">Datei hochladen</button>
+                        <button id="renameFileButton" class="secondary-button">Datei umbenennen</button>
+                        <button id="deleteFileButton" class="secondary-button">Datei löschen</button>
+                        <button id="openUploadsFolderButton" class="secondary-button">Uploads-Ordner öffnen</button>
+                        <button id="openDataFolderFromFilesButton" class="secondary-button">Datenordner öffnen</button>
+                    </section>
+
+                    <p id="filesLocationHint" class="location-hint location-hint-spaced"></p>
+
+                    <div id="fileStatus" class="status-strip info"></div>
+
+                    <section class="files-layout">
+                        <article class="card file-list-card">
+                            <div class="card-header">
+                                <h2>Uploads</h2>
+                            </div>
+                            <div id="fileList" class="file-list"></div>
+                        </article>
+
+                        <article class="card editor-card">
+                            <div class="card-header sticky-header">
+                                <h2 id="editorTitle">JSON-Inhalt</h2>
+                                <button id="saveFileButton" class="primary-button">Änderungen speichern</button>
+                            </div>
+                            <textarea id="fileEditor" spellcheck="false" placeholder="Datei auswählen, um JSON anzuzeigen..."></textarea>
+                        </article>
+                    </section>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
