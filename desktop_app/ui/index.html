@@ -102,6 +102,16 @@
                     <section class="card table-card">
                         <div class="card-header">
                             <h2>Transaktionen</h2>
+                            <div class="table-pagination-toolbar">
+                                <label class="table-page-size-control" for="transactionsPageSize">
+                                    <span>Pro Seite</span>
+                                    <select id="transactionsPageSize">
+                                        <option value="50">50</option>
+                                        <option value="100">100</option>
+                                        <option value="200">200</option>
+                                    </select>
+                                </label>
+                            </div>
                         </div>
                         <div class="table-wrapper">
                             <table>
@@ -117,6 +127,10 @@
                                 <tbody id="transactionsTableBody"></tbody>
                             </table>
                         </div>
+                        <div class="table-pagination-footer">
+                            <p id="transactionsPaginationSummary" class="table-pagination-summary"></p>
+                            <div id="transactionsPagination" class="table-pagination" aria-label="Seitennavigation Transaktionen"></div>
+                        </div>
                     </section>
                 </div>
             </section>
@@ -129,9 +143,13 @@
                             <button id="startCategorizerUploadButton" class="primary-button">CSV-Datei auswählen</button>
                         </div>
                         <p class="upload-intro-text">
-                            Lade hier eine CSV-Datei wie bisher aus dem bisherigen Input-Workflow hoch. Unklare Transaktionen
-                            werden direkt in der Oberfläche geprüft, kategorisiert und danach als JSON in den Uploads gespeichert.
+                            Importiere eine CSV-Datei, prüfe nur offene Fälle und speichere das Ergebnis anschließend direkt im Uploads-Ordner.
                         </p>
+                        <ol class="upload-step-list">
+                            <li>CSV auswählen und automatisch analysieren lassen.</li>
+                            <li>Nur offene Transaktionen mit Kategorie und Regelname bestätigen.</li>
+                            <li>Ergebnisdatei wird automatisch gespeichert und kann danach im Dashboard ausgewertet werden.</li>
+                        </ol>
                         <div class="upload-meta-row">
                             <div class="upload-meta-item">
                                 <span>Aktuelle Datei</span>
@@ -142,6 +160,25 @@
                                 <strong id="uploadProgressPill" class="progress-pill">Bereit</strong>
                             </div>
                         </div>
+                        <div class="upload-progress-block">
+                            <div class="upload-progress-track" aria-hidden="true">
+                                <div id="uploadProgressBar" class="upload-progress-fill"></div>
+                            </div>
+                            <div class="upload-progress-stats">
+                                <div class="upload-progress-stat">
+                                    <span>Manuell geprüft</span>
+                                    <strong id="uploadReviewedCount">0</strong>
+                                </div>
+                                <div class="upload-progress-stat">
+                                    <span>Automatisch erkannt</span>
+                                    <strong id="uploadAutoResolvedCount">0</strong>
+                                </div>
+                                <div class="upload-progress-stat">
+                                    <span>Noch offen</span>
+                                    <strong id="uploadRemainingCount">0</strong>
+                                </div>
+                            </div>
+                        </div>
                     </section>
 
                     <div id="uploadStatus" class="status-strip info"></div>
@@ -149,9 +186,39 @@
                     <section id="uploadEmptyState" class="card empty-state-card">
                         <h2>Kein aktiver Verarbeitungsvorgang</h2>
                         <p>
-                            Wähle eine CSV-Datei aus, um die Categorizer-Logik in der Desktop-App zu starten. Bereits bekannte
-                            Regeln werden automatisch angewendet, nur offene Fälle werden dir zur Auswahl angezeigt.
+                            Wähle eine CSV-Datei aus. Bereits bekannte Regeln werden automatisch angewendet, und nur offene Fälle landen in der manuellen Prüfung.
                         </p>
+                    </section>
+
+                    <section id="uploadCompletionCard" class="card upload-completion-card hidden">
+                        <div class="card-header">
+                            <div>
+                                <h2>Verarbeitung abgeschlossen</h2>
+                                <p id="uploadCompletionSummary" class="card-subtitle"></p>
+                            </div>
+                            <div class="workflow-actions">
+                                <button id="openUploadsFolderFromCompletionButton" class="secondary-button">Uploads-Ordner öffnen</button>
+                                <button id="goToDashboardButton" class="primary-button">Zum Dashboard</button>
+                            </div>
+                        </div>
+                        <div class="upload-completion-grid">
+                            <article class="upload-info-card">
+                                <span>Ergebnisdatei</span>
+                                <strong id="uploadCompletionFilename"></strong>
+                            </article>
+                            <article class="upload-info-card">
+                                <span>Transaktionen gesamt</span>
+                                <strong id="uploadCompletionTransactions"></strong>
+                            </article>
+                            <article class="upload-info-card">
+                                <span>Automatisch erkannt</span>
+                                <strong id="uploadCompletionAutoResolved"></strong>
+                            </article>
+                            <article class="upload-info-card">
+                                <span>Manuell geprüft</span>
+                                <strong id="uploadCompletionReviewed"></strong>
+                            </article>
+                        </div>
                     </section>
 
                     <section id="uploadWorkflowCard" class="card upload-workflow-card hidden">
@@ -162,28 +229,50 @@
                             </div>
                             <div class="workflow-actions">
                                 <button id="cancelUploadWorkflowButton" class="danger-button">Vorgang abbrechen</button>
-                                <button id="submitUploadDecisionButton" class="success-button">Kategorie übernehmen</button>
+                                <button id="submitUploadDecisionButton" class="success-button">Entscheidung speichern und weiter</button>
                             </div>
                         </div>
+
+                        <section class="upload-guidance-grid">
+                            <article class="upload-guidance-card">
+                                <span>Vorschlag</span>
+                                <strong id="reviewSuggestedCategory"></strong>
+                                <p id="reviewSuggestionSource"></p>
+                            </article>
+                            <article class="upload-guidance-card">
+                                <span>Bewertung</span>
+                                <strong id="reviewSuggestionConfidence"></strong>
+                                <p id="reviewSuggestionDetail"></p>
+                            </article>
+                            <article class="upload-guidance-card upload-guidance-card-wide">
+                                <span>Wirkung deiner Entscheidung</span>
+                                <strong id="uploadDecisionPreviewCategory"></strong>
+                                <p id="uploadDecisionPreviewText"></p>
+                            </article>
+                        </section>
 
                         <section class="upload-form-grid">
                             <label class="field">
                                 <span>Bestehende Kategorie</span>
                                 <div id="uploadCategorySelect" class="custom-select" data-placeholder="Bestehende Kategorie auswählen"></div>
+                                <small class="field-help">Wähle eine vorhandene Kategorie. Diese Auswahl wird deaktiviert, sobald du eine neue Kategorie anlegst.</small>
                             </label>
                             <label class="field">
-                                <span>Neue Kategorie</span>
+                                <span>Neue Kategorie anlegen</span>
                                 <input
                                     id="uploadCategoryInput"
                                     type="text"
                                     placeholder="Optional neue Kategorie eingeben"
                                 >
+                                <small class="field-help">Wenn hier Text steht, wird statt der bestehenden Auswahl diese neue Kategorie gespeichert.</small>
                             </label>
                             <label class="field">
-                                <span>Ruleset-Name</span>
-                                <div id="uploadRulesetSelect" class="custom-select" data-placeholder="Ruleset auswählen"></div>
+                                <span>Regelname für zukünftige Zuordnung</span>
+                                <div id="uploadRulesetSelect" class="custom-select" data-placeholder="Regelname auswählen"></div>
+                                <small class="field-help">Der Regelname wird gespeichert und für ähnliche künftige Buchungen automatisch verwendet.</small>
                             </label>
                         </section>
+                        <p id="uploadCategoryValidation" class="upload-inline-validation hidden"></p>
 
                         <div class="upload-section-heading">Transaktionsdaten</div>
 
@@ -197,8 +286,8 @@
                                 <strong id="reviewAmount"></strong>
                             </article>
                             <article class="upload-info-card upload-info-card-wide">
-                                <span>Vorgeschlagene Kategorie</span>
-                                <strong id="reviewSuggestedCategory"></strong>
+                                <span>Regel-Vorschau</span>
+                                <strong id="reviewRulePreview"></strong>
                             </article>
                         </section>
 
@@ -230,7 +319,7 @@
                         <div class="card-header sticky-header">
                             <div>
                                 <h2>Regeln bearbeiten</h2>
-                                <p class="card-subtitle">Hier kann die Datei learned_rules.json direkt bearbeitet werden.</p>
+                                <p class="card-subtitle">Regeln können gesucht, sortiert, gesammelt geändert und mit Trefferzahlen geprüft werden.</p>
                                 <p id="rulesLocationHint" class="location-hint"></p>
                             </div>
                             <div class="workflow-actions">
@@ -241,7 +330,48 @@
                             </div>
                         </div>
                         <div id="rulesStatus" class="status-strip info"></div>
-                        <textarea id="rulesEditor" spellcheck="false" placeholder="Regeln werden geladen..."></textarea>
+                        <div class="rules-toolbar">
+                            <label class="field rules-search-field">
+                                <span>Suche</span>
+                                <input id="rulesSearchInput" type="text" placeholder="Nach Regelname oder Kategorie filtern..." autocomplete="off">
+                            </label>
+                            <div class="rules-bulk-panel">
+                                <div class="rules-bulk-meta">
+                                    <strong id="rulesSelectionCount">0 Regeln ausgewählt</strong>
+                                    <span id="rulesDuplicateSummary">Keine Dubletten erkannt</span>
+                                </div>
+                                <div class="rules-bulk-actions">
+                                    <label class="field rules-bulk-field">
+                                        <span>Sammel-Kategorie</span>
+                                        <select id="rulesBulkCategorySelect">
+                                            <option value="">Kategorie für Auswahl setzen</option>
+                                        </select>
+                                    </label>
+                                    <button id="applyBulkCategoryButton" class="secondary-button" type="button">Auf Auswahl anwenden</button>
+                                    <button id="addRuleRowButton" class="primary-button" type="button">Regel hinzufügen</button>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="rules-table-wrapper">
+                            <table class="rules-table">
+                                <thead>
+                                    <tr>
+                                        <th class="rules-checkbox-column">
+                                            <input id="rulesSelectAllCheckbox" type="checkbox" aria-label="Alle sichtbaren Regeln auswählen">
+                                        </th>
+                                        <th data-rules-sort-column="rule">Regelname</th>
+                                        <th data-rules-sort-column="category">Kategorie</th>
+                                        <th data-rules-sort-column="hits">Treffer</th>
+                                        <th data-rules-sort-column="duplicate">Dublettenhinweis</th>
+                                        <th class="rules-actions-column">Aktion</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="rulesTableBody"></tbody>
+                            </table>
+                        </div>
+                        <div class="rules-footer">
+                            <p id="rulesTableSummary" class="rules-summary"></p>
+                        </div>
                     </section>
                 </div>
             </section>
@@ -279,6 +409,18 @@
                 </div>
             </section>
         </main>
+    </div>
+
+    <div id="appModalOverlay" class="app-modal-overlay hidden" role="presentation">
+        <div class="app-modal" role="dialog" aria-modal="true" aria-labelledby="appModalTitle">
+            <div class="app-modal-header">
+                <h2 id="appModalTitle"></h2>
+                <p id="appModalMessage" class="app-modal-message"></p>
+            </div>
+            <div id="appModalBody" class="app-modal-body"></div>
+            <p id="appModalError" class="app-modal-error hidden"></p>
+            <div id="appModalActions" class="app-modal-actions"></div>
+        </div>
     </div>
 
     <script src="app.js"></script>

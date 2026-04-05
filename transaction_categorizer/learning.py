@@ -1,7 +1,6 @@
 import json
 import os
 from config import LEARNING_PATH
-from runtime_paths import bundled_rules_path
 import re
 
 
@@ -40,12 +39,6 @@ def extract_keyword(text):
 
 def load_rules():
     if not os.path.exists(LEARNING_PATH):
-        default_rules_path = bundled_rules_path()
-        if default_rules_path.exists():
-            with open(default_rules_path, "r", encoding="utf-8") as f:
-                rules = json.load(f)
-            save_rules(rules)
-            return rules
         return {}
     
     with open(LEARNING_PATH, "r", encoding="utf-8") as f:

@@ -91,6 +91,9 @@ class UploadedFile:
 class ReviewCandidate:
     row_index: int
     default_category: str
+    suggestion_source: str
+    suggestion_detail: str
+    suggestion_confidence: str
     default_rule_name: str
     rule_options: list[dict[str, str]]
     transaction: dict[str, object]
@@ -361,6 +364,13 @@ class CategorizationSession:
         text = row["Text"]
         debtor_name = normalize_rule_name(row["Beguenstigter/Zahlungspflichtiger"])
         default_category = self.cluster_names.get(row["cluster"]) or "Sonstiges"
+        cluster_size = int((self.dataframe["cluster"] == row["cluster"]).sum())
+        if cluster_size >= 8:
+            suggestion_confidence = "hoch"
+        elif cluster_size >= 4:
+            suggestion_confidence = "mittel"
+        else:
+            suggestion_confidence = "niedrig"
         rule_options = self._build_rule_options(row, debtor_name, text)
         default_rule_name = rule_options[0]["value"] if rule_options else ""
         transaction = {
@@ -374,6 +384,9 @@ class CategorizationSession:
         return ReviewCandidate(
             row_index=row_index,
             default_category=default_category,
+            suggestion_source="Cluster-Vorschlag",
+            suggestion_detail=f"Aus {cluster_size} ähnlichen Transaktionen abgeleitet.",
+            suggestion_confidence=suggestion_confidence,
             default_rule_name=default_rule_name,
             rule_options=rule_options,
             transaction=transaction,
@@ -433,17 +446,31 @@ class CategorizationSession:
             return self.finalize()
 
         candidate = self.pending_candidates[0]
+        progress = self._build_progress()
+        completed_steps = progress["reviewed"] + progress["autoResolved"]
         return {
             "success": True,
             "completed": False,
             "sessionId": self.session_id,
             "sourceName": self.source_path.name,
-            "progress": self._build_progress(),
+            "progress": progress,
             "transaction": candidate.transaction,
             "defaultCategory": candidate.default_category,
+            "suggestionSource": candidate.suggestion_source,
+            "suggestionDetail": candidate.suggestion_detail,
+            "suggestionConfidence": candidate.suggestion_confidence,
             "categoryOptions": sorted(self.category_catalog, key=lambda item: item.lower()),
             "ruleOptions": candidate.rule_options,
             "selectedRule": candidate.default_rule_name,
+            "decisionPreview": {
+                "category": candidate.default_category,
+                "ruleName": candidate.default_rule_name,
+                "effect": "Speichert Kategorie und Regel fuer künftige automatische Zuordnungen.",
+            },
+            "progressSummary": {
+                "completedSteps": completed_steps,
+                "totalSteps": progress["totalTransactions"],
+            },
         }
 
     def submit_decision(self, category_name: str, rule_name: str) -> dict[str, object]:
@@ -451,6 +478,7 @@ class CategorizationSession:
             return self.finalize()
 
         candidate = self.pending_candidates[0]
+        previous_progress = self._build_progress()
         selected_category = category_name.strip() or candidate.default_category
         if not selected_category:
             raise ValueError("Bitte wähle eine Kategorie oder gib eine neue Kategorie ein.")
@@ -464,7 +492,10 @@ class CategorizationSession:
         self.category_catalog.add(selected_category)
         self.reviewed_count += 1
         self._recompute_pending_candidates()
-        return self.current_payload()
+        response = self.current_payload()
+        current_progress = self._build_progress()
+        response["newlyAutoResolvedCount"] = max(current_progress["autoResolved"] - previous_progress["autoResolved"], 0)
+        return response
 
     def _resolve_rule_name(self, selected_rule: str, candidate: ReviewCandidate) -> str:
         if selected_rule == "__BOOKING_TEXT__":
@@ -486,6 +517,7 @@ class CategorizationSession:
             "sourceName": self.source_path.name,
             "filename": saved_path.name,
             "transactionCount": len(result),
+            "progress": self._build_progress(),
             "message": f"{saved_path.name} wurde verarbeitet und in uploads gespeichert.",
         }
 

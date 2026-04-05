@@ -2,6 +2,7 @@ const state = {
     files: [],
     transactions: [],
     selectedFile: null,
+    selectedFileContent: '',
     editorDirty: false,
     rulesDirty: false,
     currentView: 'dashboard',
@@ -18,6 +19,24 @@ const state = {
     storageInfo: null,
     customSelects: {},
     datePickers: {},
+    transactionPagination: {
+        pageSize: 50,
+        currentPage: 1,
+    },
+    modal: {
+        resolver: null,
+        activeInput: null,
+        submitActionId: null,
+    },
+    rulesManager: {
+        entries: [],
+        nextId: 1,
+        search: '',
+        sortColumn: 'rule',
+        sortDirection: 1,
+        selectedIds: new Set(),
+        hitIndex: [],
+    },
 };
 
 const chartIds = {
@@ -140,6 +159,225 @@ function escapeHtml(value) {
         .replace(/'/g, '&#39;');
 }
 
+function normalizeRuleValue(value) {
+    return String(value || '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+function buildRuleHitIndex(files) {
+    const records = [];
+    files.forEach((file) => {
+        (file.data || []).forEach((entry) => {
+            const searchableParts = [
+                entry.Text,
+                entry['Debitor/Kreditor'],
+                entry['Beguenstigter/Zahlungspflichtiger'],
+                entry.Buchungstext,
+                entry.Verwendungszweck,
+            ];
+            const searchableText = normalizeRuleValue(searchableParts.filter(Boolean).join(' '));
+            if (searchableText) {
+                records.push(searchableText);
+            }
+        });
+    });
+    return records;
+}
+
+function markEditorDirty(isDirty) {
+    state.editorDirty = isDirty;
+    document.getElementById('editorTitle').textContent = state.selectedFile
+        ? `JSON-Inhalt - ${state.selectedFile}${isDirty ? ' *' : ''}`
+        : 'JSON-Inhalt';
+}
+
+function markRulesDirty(isDirty) {
+    state.rulesDirty = isDirty;
+    const title = document.querySelector('#rulesView h2');
+    if (title) {
+        title.textContent = isDirty ? 'Regeln bearbeiten *' : 'Regeln bearbeiten';
+    }
+}
+
+function getModalElements() {
+    return {
+        overlay: document.getElementById('appModalOverlay'),
+        title: document.getElementById('appModalTitle'),
+        message: document.getElementById('appModalMessage'),
+        body: document.getElementById('appModalBody'),
+        error: document.getElementById('appModalError'),
+        actions: document.getElementById('appModalActions'),
+    };
+}
+
+function closeModal(result = null) {
+    const { overlay, title, message, body, error, actions } = getModalElements();
+    overlay.classList.add('hidden');
+    title.textContent = '';
+    message.textContent = '';
+    body.innerHTML = '';
+    actions.innerHTML = '';
+    error.textContent = '';
+    error.classList.add('hidden');
+    const resolver = state.modal.resolver;
+    state.modal.resolver = null;
+    state.modal.activeInput = null;
+    state.modal.submitActionId = null;
+    if (resolver) {
+        resolver(result);
+    }
+}
+
+function showModalError(message) {
+    const { error } = getModalElements();
+    error.textContent = message;
+    error.classList.remove('hidden');
+}
+
+function openModal(options) {
+    const {
+        title,
+        message = '',
+        actions = [],
+        input = null,
+        dangerous = false,
+    } = options;
+
+    const { overlay, title: titleElement, message: messageElement, body, error, actions: actionsElement } = getModalElements();
+    titleElement.textContent = title;
+    messageElement.textContent = message;
+    body.innerHTML = '';
+    actionsElement.innerHTML = '';
+    error.textContent = '';
+    error.classList.add('hidden');
+
+    if (input) {
+        const wrapper = document.createElement('label');
+        wrapper.className = 'field app-modal-field';
+        const label = document.createElement('span');
+        label.textContent = input.label || 'Wert';
+        const inputElement = document.createElement('input');
+        inputElement.type = input.type || 'text';
+        inputElement.value = input.value || '';
+        inputElement.placeholder = input.placeholder || '';
+        wrapper.appendChild(label);
+        wrapper.appendChild(inputElement);
+        body.appendChild(wrapper);
+        state.modal.activeInput = inputElement;
+        state.modal.submitActionId = input.submitActionId || null;
+    }
+
+    actions.forEach((action) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = action.className || (action.primary ? 'primary-button' : (dangerous || action.danger ? 'danger-button' : 'secondary-button'));
+        button.textContent = action.label;
+        button.addEventListener('click', () => {
+            const value = state.modal.activeInput ? state.modal.activeInput.value : undefined;
+            closeModal({ action: action.id, value });
+        });
+        actionsElement.appendChild(button);
+    });
+
+    overlay.classList.remove('hidden');
+    return new Promise((resolve) => {
+        state.modal.resolver = resolve;
+        window.requestAnimationFrame(() => {
+            if (state.modal.activeInput) {
+                state.modal.activeInput.focus();
+                state.modal.activeInput.select();
+                return;
+            }
+            actionsElement.querySelector('button')?.focus();
+        });
+    });
+}
+
+async function showConfirmModal(title, message, confirmLabel, options = {}) {
+    const result = await openModal({
+        title,
+        message,
+        dangerous: options.dangerous,
+        actions: [
+            { id: 'cancel', label: options.cancelLabel || 'Abbrechen', className: 'secondary-button' },
+            { id: 'confirm', label: confirmLabel, className: options.dangerous ? 'danger-button' : 'primary-button' },
+        ],
+    });
+    return result?.action === 'confirm';
+}
+
+async function showPromptModal(title, message, inputOptions, confirmLabel) {
+    let currentValue = inputOptions.value || '';
+    let currentMessage = message;
+
+    while (true) {
+        const result = await openModal({
+            title,
+            message: currentMessage,
+            input: {
+                ...inputOptions,
+                value: currentValue,
+            },
+            actions: [
+                { id: 'cancel', label: 'Abbrechen', className: 'secondary-button' },
+                { id: 'confirm', label: confirmLabel, className: 'primary-button' },
+            ],
+        });
+
+        if (!result || result.action !== 'confirm') {
+            return null;
+        }
+
+        const validator = inputOptions.validate || (() => null);
+        const validationMessage = validator(result.value);
+        if (!validationMessage) {
+            return result.value;
+        }
+
+        currentValue = result.value;
+        currentMessage = `${message} ${validationMessage}`;
+    }
+}
+
+async function confirmUnsavedChanges(kind) {
+    const isRules = kind === 'rules';
+    const title = isRules ? 'Ungespeicherte Regeln' : 'Ungespeicherte Dateiänderungen';
+    const message = isRules
+        ? 'Die Regeln wurden geändert. Möchtest du sie speichern, verwerfen oder den Vorgang abbrechen?'
+        : 'Die ausgewählte Datei wurde geändert. Möchtest du sie speichern, verwerfen oder den Vorgang abbrechen?';
+
+    const result = await openModal({
+        title,
+        message,
+        actions: [
+            { id: 'cancel', label: 'Abbrechen', className: 'secondary-button' },
+            { id: 'discard', label: 'Verwerfen', className: 'danger-button' },
+            { id: 'save', label: 'Speichern', className: 'primary-button' },
+        ],
+    });
+
+    return result?.action || 'cancel';
+}
+
+function initializeModal() {
+    const { overlay } = getModalElements();
+    overlay.addEventListener('click', (event) => {
+        if (event.target === overlay) {
+            closeModal({ action: 'cancel' });
+        }
+    });
+
+    document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape' && state.modal.resolver) {
+            event.preventDefault();
+            closeModal({ action: 'cancel' });
+        }
+        if (event.key === 'Enter' && state.modal.resolver && state.modal.activeInput && document.activeElement === state.modal.activeInput) {
+            event.preventDefault();
+            closeModal({ action: state.modal.submitActionId || 'confirm', value: state.modal.activeInput.value });
+        }
+    });
+}
+
 function createCustomSelect(id) {
     const root = document.getElementById(id);
     if (!root || state.customSelects[id]) {
@@ -212,6 +450,13 @@ function closeAllDatePickers() {
 function closeAllPopovers() {
     closeAllCustomSelects();
     closeAllDatePickers();
+}
+
+function isClickInsidePopoverControl(target) {
+    if (!(target instanceof Element)) {
+        return false;
+    }
+    return Boolean(target.closest('.custom-select') || target.closest('.date-field'));
 }
 
 function updateCustomSelectDisplay(id) {
@@ -288,12 +533,26 @@ function setCustomSelectValue(id, value, emitChange = false) {
     }
 }
 
+function setCustomSelectDisabled(id, disabled) {
+    const instance = createCustomSelect(id);
+    instance.root.classList.toggle('is-disabled', disabled || instance.options.length === 0);
+    instance.trigger.disabled = disabled || instance.options.length === 0;
+    if (disabled) {
+        instance.root.classList.remove('is-open');
+        instance.menu.hidden = true;
+        instance.trigger.setAttribute('aria-expanded', 'false');
+    }
+}
+
 function initializeCustomSelects() {
     ['categoryFilter', 'uploadCategorySelect', 'uploadRulesetSelect'].forEach((id) => {
         createCustomSelect(id);
     });
 
-    document.addEventListener('click', () => {
+    document.addEventListener('click', (event) => {
+        if (isClickInsidePopoverControl(event.target)) {
+            return;
+        }
         closeAllPopovers();
     });
 
@@ -550,7 +809,76 @@ async function openStorageFolder(method, statusElementId, successMessage) {
     setStatus(statusElementId, `${successMessage}: ${response.path}`, 'info');
 }
 
-function setActiveView(viewName) {
+async function discardRulesChanges() {
+    const response = await backendCall('getRulesContent');
+    if (!response.success) {
+        setStatus('rulesStatus', response.error, 'error');
+        return false;
+    }
+    loadRulesManagerFromContent(response.content);
+    setStatus('rulesStatus', 'Ungespeicherte Änderungen wurden verworfen.', 'info');
+    return true;
+}
+
+async function discardFileChanges() {
+    if (!state.selectedFile) {
+        document.getElementById('fileEditor').value = '';
+        markEditorDirty(false);
+        return true;
+    }
+
+    const response = await backendCall('getFileContent', state.selectedFile);
+    if (!response.success) {
+        setStatus('fileStatus', response.error, 'error');
+        return false;
+    }
+
+    state.selectedFileContent = response.content;
+    document.getElementById('fileEditor').value = response.content;
+    markEditorDirty(false);
+    setStatus('fileStatus', 'Ungespeicherte Änderungen wurden verworfen.', 'info');
+    return true;
+}
+
+async function resolvePendingChanges(scope) {
+    if (scope === 'files' && !state.editorDirty) {
+        return true;
+    }
+    if (scope === 'rules' && !state.rulesDirty) {
+        return true;
+    }
+
+    const action = await confirmUnsavedChanges(scope === 'rules' ? 'rules' : 'file');
+    if (action === 'cancel') {
+        return false;
+    }
+
+    if (action === 'save') {
+        return scope === 'rules' ? saveRulesEditor() : saveCurrentFile();
+    }
+
+    return scope === 'rules' ? discardRulesChanges() : discardFileChanges();
+}
+
+async function setActiveView(viewName) {
+    if (viewName === state.currentView) {
+        return;
+    }
+
+    if (state.currentView === 'files') {
+        const allowed = await resolvePendingChanges('files');
+        if (!allowed) {
+            return;
+        }
+    }
+
+    if (state.currentView === 'rules') {
+        const allowed = await resolvePendingChanges('rules');
+        if (!allowed) {
+            return;
+        }
+    }
+
     state.currentView = viewName;
     document.getElementById('dashboardView').classList.toggle('active', viewName === 'dashboard');
     document.getElementById('categorizerView').classList.toggle('active', viewName === 'categorizer');
@@ -782,11 +1110,8 @@ function getSortValue(transaction, column) {
     return String(transaction[column] || '').toLowerCase();
 }
 
-function renderTransactionsTable(transactions) {
-    const body = document.getElementById('transactionsTableBody');
-    body.innerHTML = '';
-
-    const sorted = [...transactions].sort((left, right) => {
+function getSortedTransactions(transactions) {
+    return [...transactions].sort((left, right) => {
         const leftValue = getSortValue(left, state.sortColumn);
         const rightValue = getSortValue(right, state.sortColumn);
         if (leftValue > rightValue) {
@@ -797,8 +1122,140 @@ function renderTransactionsTable(transactions) {
         }
         return 0;
     });
+}
 
-    sorted.forEach((transaction) => {
+function getTransactionPagination(totalCount) {
+    const pageSize = state.transactionPagination.pageSize;
+    const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
+    const currentPage = Math.min(state.transactionPagination.currentPage, totalPages);
+    state.transactionPagination.currentPage = currentPage;
+
+    return {
+        pageSize,
+        totalCount,
+        totalPages,
+        currentPage,
+        startIndex: totalCount ? (currentPage - 1) * pageSize : 0,
+        endIndex: totalCount ? Math.min(currentPage * pageSize, totalCount) : 0,
+    };
+}
+
+function buildPaginationModel(totalPages, currentPage) {
+    if (totalPages <= 7) {
+        return Array.from({ length: totalPages }, (_, index) => index + 1);
+    }
+
+    const pages = new Set([1, totalPages, currentPage]);
+    if (currentPage <= 3) {
+        pages.add(2);
+        pages.add(3);
+        pages.add(4);
+    } else if (currentPage >= totalPages - 2) {
+        pages.add(totalPages - 1);
+        pages.add(totalPages - 2);
+        pages.add(totalPages - 3);
+    } else {
+        pages.add(currentPage - 1);
+        pages.add(currentPage + 1);
+    }
+
+    const sortedPages = [...pages].filter((page) => page >= 1 && page <= totalPages).sort((left, right) => left - right);
+    const model = [];
+
+    sortedPages.forEach((page, index) => {
+        if (index > 0 && page - sortedPages[index - 1] > 1) {
+            model.push('ellipsis');
+        }
+        model.push(page);
+    });
+
+    return model;
+}
+
+function goToTransactionPage(page) {
+    const totalCount = getFilteredTransactions().length;
+    const { totalPages, currentPage } = getTransactionPagination(totalCount);
+    const nextPage = Math.max(1, Math.min(page, totalPages));
+    if (nextPage === currentPage) {
+        return;
+    }
+    state.transactionPagination.currentPage = nextPage;
+    refreshDashboard();
+}
+
+function resetTransactionPagination() {
+    state.transactionPagination.currentPage = 1;
+}
+
+function renderTransactionPagination(totalCount) {
+    const summary = document.getElementById('transactionsPaginationSummary');
+    const container = document.getElementById('transactionsPagination');
+    const pagination = getTransactionPagination(totalCount);
+
+    if (!summary || !container) {
+        return pagination;
+    }
+
+    if (!totalCount) {
+        summary.textContent = 'Keine Transaktionen im aktuellen Filter';
+        container.innerHTML = '';
+        return pagination;
+    }
+
+    summary.textContent = `${pagination.startIndex + 1}-${pagination.endIndex} von ${totalCount} Transaktionen`;
+    container.innerHTML = '';
+
+    const previousButton = document.createElement('button');
+    previousButton.type = 'button';
+    previousButton.className = 'table-pagination-button table-pagination-arrow';
+    previousButton.textContent = '◀';
+    previousButton.disabled = pagination.currentPage <= 1;
+    previousButton.setAttribute('aria-label', 'Vorherige Seite');
+    previousButton.addEventListener('click', () => goToTransactionPage(pagination.currentPage - 1));
+    container.appendChild(previousButton);
+
+    buildPaginationModel(pagination.totalPages, pagination.currentPage).forEach((entry) => {
+        if (entry === 'ellipsis') {
+            const ellipsis = document.createElement('span');
+            ellipsis.className = 'table-pagination-ellipsis';
+            ellipsis.textContent = '...';
+            container.appendChild(ellipsis);
+            return;
+        }
+
+        const pageButton = document.createElement('button');
+        pageButton.type = 'button';
+        pageButton.className = `table-pagination-button ${entry === pagination.currentPage ? 'is-active' : ''}`;
+        pageButton.textContent = String(entry);
+        pageButton.setAttribute('aria-label', `Seite ${entry}`);
+        if (entry === pagination.currentPage) {
+            pageButton.setAttribute('aria-current', 'page');
+        }
+        pageButton.addEventListener('click', () => goToTransactionPage(entry));
+        container.appendChild(pageButton);
+    });
+
+    const nextButton = document.createElement('button');
+    nextButton.type = 'button';
+    nextButton.className = 'table-pagination-button table-pagination-arrow';
+    nextButton.textContent = '▶';
+    nextButton.disabled = pagination.currentPage >= pagination.totalPages;
+    nextButton.setAttribute('aria-label', 'Nächste Seite');
+    nextButton.addEventListener('click', () => goToTransactionPage(pagination.currentPage + 1));
+    container.appendChild(nextButton);
+
+    return pagination;
+}
+
+function renderTransactionsTable(transactions) {
+    const body = document.getElementById('transactionsTableBody');
+    body.innerHTML = '';
+
+    const sorted = getSortedTransactions(transactions);
+    const pagination = renderTransactionPagination(sorted.length);
+    const visibleRows = sorted.slice(pagination.startIndex, pagination.endIndex);
+
+    visibleRows.forEach((transaction) => {
         const row = document.createElement('tr');
         const amountClass = transaction.Betrag >= 0 ? 'amount-positive' : 'amount-negative';
         row.innerHTML = `
@@ -878,8 +1335,11 @@ async function selectFile(filename) {
     }
 
     if (state.editorDirty) {
-        const shouldSave = window.confirm('Es gibt ungespeicherte Änderungen. Jetzt speichern?');
-        if (shouldSave) {
+        const action = await confirmUnsavedChanges('file');
+        if (action === 'cancel') {
+            return;
+        }
+        if (action === 'save') {
             const saved = await saveCurrentFile();
             if (!saved) {
                 return;
@@ -894,9 +1354,9 @@ async function selectFile(filename) {
     }
 
     state.selectedFile = filename;
-    state.editorDirty = false;
+    state.selectedFileContent = response.content;
     document.getElementById('fileEditor').value = response.content;
-    document.getElementById('editorTitle').textContent = `JSON-Inhalt - ${filename}`;
+    markEditorDirty(false);
     setStatus('fileStatus', `${filename} geladen.`, 'info');
     renderFileList();
 }
@@ -914,7 +1374,8 @@ async function saveCurrentFile() {
         return false;
     }
 
-    state.editorDirty = false;
+    state.selectedFileContent = content;
+    markEditorDirty(false);
     setStatus('fileStatus', response.message, 'info');
     await refreshAllData(state.selectedFile);
     return true;
@@ -926,7 +1387,27 @@ async function renameSelectedFile() {
         return;
     }
 
-    const newName = window.prompt('Neuer Dateiname:', state.selectedFile);
+    const newName = await showPromptModal(
+        'Datei umbenennen',
+        `Gib einen neuen Namen für ${state.selectedFile} ein.`,
+        {
+            label: 'Dateiname',
+            value: state.selectedFile,
+            placeholder: 'Neuer Dateiname',
+            submitActionId: 'confirm',
+            validate: (value) => {
+                const trimmed = String(value || '').trim();
+                if (!trimmed) {
+                    return 'Der Dateiname darf nicht leer sein.';
+                }
+                if (/[\\/]/.test(trimmed)) {
+                    return 'Dateinamen dürfen keine Pfadtrenner enthalten.';
+                }
+                return null;
+            },
+        },
+        'Umbenennen',
+    );
     if (!newName) {
         return;
     }
@@ -938,7 +1419,7 @@ async function renameSelectedFile() {
     }
 
     state.selectedFile = response.filename;
-    state.editorDirty = false;
+    markEditorDirty(false);
     setStatus('fileStatus', response.message, 'info');
     await refreshAllData(response.filename);
 }
@@ -949,7 +1430,13 @@ async function deleteSelectedFile() {
         return;
     }
 
-    if (!window.confirm(`Soll ${state.selectedFile} wirklich gelöscht werden?`)) {
+    const confirmed = await showConfirmModal(
+        'Datei löschen',
+        `Soll ${state.selectedFile} wirklich gelöscht werden? Diese Aktion kann nicht rückgängig gemacht werden.`,
+        'Löschen',
+        { dangerous: true },
+    );
+    if (!confirmed) {
         return;
     }
 
@@ -960,7 +1447,8 @@ async function deleteSelectedFile() {
     }
 
     state.selectedFile = null;
-    state.editorDirty = false;
+    state.selectedFileContent = '';
+    markEditorDirty(false);
     document.getElementById('fileEditor').value = '';
     document.getElementById('editorTitle').textContent = 'JSON-Inhalt';
     setStatus('fileStatus', response.message, 'info');
@@ -978,7 +1466,12 @@ async function uploadFile() {
 
     let overwrite = false;
     if (selected.exists) {
-        overwrite = window.confirm(`${selected.name} existiert bereits. Soll die Datei überschrieben werden?`);
+        overwrite = await showConfirmModal(
+            'Vorhandene Datei überschreiben',
+            `${selected.name} existiert bereits im Uploads-Ordner. Soll die Datei überschrieben werden?`,
+            'Überschreiben',
+            { dangerous: true },
+        );
         if (!overwrite) {
             return;
         }
@@ -994,6 +1487,266 @@ async function uploadFile() {
     await refreshAllData(response.filename);
 }
 
+function buildRulesEntriesMap() {
+    const map = new Map();
+    state.rulesManager.entries.forEach((entry) => {
+        const normalized = normalizeRuleValue(entry.rule);
+        if (!normalized) {
+            return;
+        }
+        if (!map.has(normalized)) {
+            map.set(normalized, []);
+        }
+        map.get(normalized).push(entry.id);
+    });
+    return map;
+}
+
+function getDuplicateRuleIds() {
+    const duplicateIds = new Set();
+    buildRulesEntriesMap().forEach((ids) => {
+        if (ids.length > 1) {
+            ids.forEach((id) => duplicateIds.add(id));
+        }
+    });
+    return duplicateIds;
+}
+
+function getRuleHitCount(ruleName) {
+    const normalizedRule = normalizeRuleValue(ruleName);
+    if (!normalizedRule) {
+        return 0;
+    }
+    return state.rulesManager.hitIndex.reduce((count, text) => count + (text.includes(normalizedRule) ? 1 : 0), 0);
+}
+
+function getRuleManagerCategories() {
+    const categories = new Set(state.transactions.map((item) => item.Kategorie).filter(Boolean));
+    state.rulesManager.entries.forEach((entry) => {
+        if (entry.category) {
+            categories.add(entry.category);
+        }
+    });
+    return [...categories].sort((left, right) => left.localeCompare(right, 'de'));
+}
+
+function buildRulesCategoryOptions(selectedValue = '', includeEmpty = false) {
+    const categories = getRuleManagerCategories();
+    const selectedCategory = String(selectedValue || '');
+
+    if (selectedCategory && !categories.includes(selectedCategory)) {
+        categories.push(selectedCategory);
+        categories.sort((left, right) => left.localeCompare(right, 'de'));
+    }
+
+    const options = [];
+    if (includeEmpty) {
+        options.push('<option value="">Kategorie wählen</option>');
+    }
+
+    categories.forEach((category) => {
+        const isSelected = category === selectedCategory ? ' selected' : '';
+        options.push(`<option value="${escapeHtml(category)}"${isSelected}>${escapeHtml(category)}</option>`);
+    });
+
+    return options.join('');
+}
+
+function updateRulesCategorySelects() {
+    const bulkSelect = document.getElementById('rulesBulkCategorySelect');
+    if (!bulkSelect) {
+        return;
+    }
+
+    const previousValue = bulkSelect.value;
+    bulkSelect.innerHTML = buildRulesCategoryOptions(previousValue, true);
+}
+
+function getFilteredRulesEntries() {
+    const query = normalizeRuleValue(state.rulesManager.search);
+    return state.rulesManager.entries.filter((entry) => {
+        if (!query) {
+            return true;
+        }
+        return normalizeRuleValue(entry.rule).includes(query) || normalizeRuleValue(entry.category).includes(query);
+    });
+}
+
+function getSortedRulesEntries(entries) {
+    const duplicateIds = getDuplicateRuleIds();
+    return [...entries].sort((left, right) => {
+        let leftValue;
+        let rightValue;
+
+        if (state.rulesManager.sortColumn === 'hits') {
+            leftValue = getRuleHitCount(left.rule);
+            rightValue = getRuleHitCount(right.rule);
+        } else if (state.rulesManager.sortColumn === 'duplicate') {
+            leftValue = duplicateIds.has(left.id) ? 1 : 0;
+            rightValue = duplicateIds.has(right.id) ? 1 : 0;
+        } else if (state.rulesManager.sortColumn === 'category') {
+            leftValue = normalizeRuleValue(left.category);
+            rightValue = normalizeRuleValue(right.category);
+        } else {
+            leftValue = normalizeRuleValue(left.rule);
+            rightValue = normalizeRuleValue(right.rule);
+        }
+
+        if (leftValue > rightValue) {
+            return state.rulesManager.sortDirection;
+        }
+        if (leftValue < rightValue) {
+            return -state.rulesManager.sortDirection;
+        }
+        return left.id - right.id;
+    });
+}
+
+function updateRulesSummary(visibleEntries) {
+    const summary = document.getElementById('rulesTableSummary');
+    const selection = document.getElementById('rulesSelectionCount');
+    const duplicates = document.getElementById('rulesDuplicateSummary');
+    const duplicateIds = getDuplicateRuleIds();
+    const duplicateCount = duplicateIds.size;
+
+    summary.textContent = `${visibleEntries.length} sichtbare Regeln, ${state.rulesManager.entries.length} insgesamt`;
+    selection.textContent = `${state.rulesManager.selectedIds.size} Regeln ausgewählt`;
+    duplicates.textContent = duplicateCount
+        ? `${duplicateCount} Regeln mit normierten Dubletten erkannt`
+        : 'Keine Dubletten erkannt';
+}
+
+function renderRulesTable() {
+    const body = document.getElementById('rulesTableBody');
+    const selectAllCheckbox = document.getElementById('rulesSelectAllCheckbox');
+    const duplicateIds = getDuplicateRuleIds();
+    const visibleEntries = getSortedRulesEntries(getFilteredRulesEntries());
+
+    updateRulesSummary(visibleEntries);
+    updateRulesCategorySelects();
+    body.innerHTML = '';
+
+    if (!visibleEntries.length) {
+        body.innerHTML = '<tr><td colspan="6" class="rules-empty-state">Keine Regeln im aktuellen Filter.</td></tr>';
+        selectAllCheckbox.checked = false;
+        selectAllCheckbox.indeterminate = false;
+        return;
+    }
+
+    visibleEntries.forEach((entry) => {
+        const row = document.createElement('tr');
+        const hitCount = getRuleHitCount(entry.rule);
+        const isDuplicate = duplicateIds.has(entry.id);
+        row.className = isDuplicate ? 'rules-row-has-duplicate' : '';
+        row.innerHTML = `
+            <td class="rules-checkbox-column"><input type="checkbox" data-rule-select="${entry.id}" ${state.rulesManager.selectedIds.has(entry.id) ? 'checked' : ''}></td>
+            <td><input type="text" data-rule-field="rule" data-rule-id="${entry.id}" value="${escapeHtml(entry.rule)}" placeholder="Regelname"></td>
+            <td><select data-rule-field="category" data-rule-id="${entry.id}">${buildRulesCategoryOptions(entry.category, true)}</select></td>
+            <td><span class="rules-hit-badge">${hitCount}</span></td>
+            <td>${isDuplicate ? '<span class="rules-duplicate-badge">Normiert doppelt</span>' : '<span class="rules-duplicate-muted">-</span>'}</td>
+            <td class="rules-actions-column"><button type="button" class="secondary-button rules-delete-button" data-rule-delete="${entry.id}">Entfernen</button></td>
+        `;
+        body.appendChild(row);
+    });
+
+    const visibleIds = visibleEntries.map((entry) => entry.id);
+    const selectedVisibleCount = visibleIds.filter((id) => state.rulesManager.selectedIds.has(id)).length;
+    selectAllCheckbox.checked = selectedVisibleCount > 0 && selectedVisibleCount === visibleIds.length;
+    selectAllCheckbox.indeterminate = selectedVisibleCount > 0 && selectedVisibleCount < visibleIds.length;
+}
+
+function setRuleEntryValue(entryId, field, value, rerender = true) {
+    const entry = state.rulesManager.entries.find((item) => item.id === entryId);
+    if (!entry) {
+        return;
+    }
+    entry[field] = value;
+    markRulesDirty(true);
+    if (rerender) {
+        renderRulesTable();
+    } else {
+        updateRulesSummary(getSortedRulesEntries(getFilteredRulesEntries()));
+    }
+}
+
+function addRuleEntry(rule = '', category = '') {
+    const entry = {
+        id: state.rulesManager.nextId,
+        rule,
+        category,
+    };
+    state.rulesManager.nextId += 1;
+    state.rulesManager.entries.push(entry);
+    markRulesDirty(true);
+    renderRulesTable();
+}
+
+function deleteRuleEntry(entryId) {
+    state.rulesManager.entries = state.rulesManager.entries.filter((entry) => entry.id !== entryId);
+    state.rulesManager.selectedIds.delete(entryId);
+    markRulesDirty(true);
+    renderRulesTable();
+}
+
+function applyBulkRuleCategory() {
+    const category = document.getElementById('rulesBulkCategorySelect').value.trim();
+    if (!category) {
+        setStatus('rulesStatus', 'Bitte zuerst eine Sammel-Kategorie angeben.', 'error');
+        return;
+    }
+
+    if (!state.rulesManager.selectedIds.size) {
+        setStatus('rulesStatus', 'Bitte zuerst mindestens eine Regel auswählen.', 'error');
+        return;
+    }
+
+    state.rulesManager.entries.forEach((entry) => {
+        if (state.rulesManager.selectedIds.has(entry.id)) {
+            entry.category = category;
+        }
+    });
+
+    markRulesDirty(true);
+    setStatus('rulesStatus', `Kategorie ${category} wurde auf ${state.rulesManager.selectedIds.size} Regeln angewendet.`, 'success');
+    renderRulesTable();
+}
+
+function serializeRulesManager() {
+    const payload = {};
+    const duplicateIds = getDuplicateRuleIds();
+    if (duplicateIds.size) {
+        throw new Error('Es gibt normierte Dubletten bei Regelnamen. Bitte bereinige diese vor dem Speichern.');
+    }
+
+    state.rulesManager.entries.forEach((entry) => {
+        const rule = entry.rule.trim();
+        const category = entry.category.trim();
+        if (!rule || !category) {
+            throw new Error('Jede Regel benötigt einen Regelnamen und eine Kategorie.');
+        }
+        payload[rule] = category;
+    });
+
+    return payload;
+}
+
+function loadRulesManagerFromContent(content) {
+    const parsed = JSON.parse(content);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new Error('Die Rules-Datei muss ein JSON-Objekt enthalten.');
+    }
+
+    state.rulesManager.entries = Object.entries(parsed).map(([rule, category], index) => ({
+        id: index + 1,
+        rule,
+        category: String(category ?? ''),
+    }));
+    state.rulesManager.nextId = state.rulesManager.entries.length + 1;
+    state.rulesManager.selectedIds = new Set();
+    markRulesDirty(false);
+    renderRulesTable();
+}
+
 async function loadRulesEditor() {
     const response = await backendCall('getRulesContent');
     if (!response.success) {
@@ -1001,23 +1754,122 @@ async function loadRulesEditor() {
         return false;
     }
 
-    document.getElementById('rulesEditor').value = response.content;
-    state.rulesDirty = false;
+    try {
+        loadRulesManagerFromContent(response.content);
+    } catch (error) {
+        setStatus('rulesStatus', error.message || String(error), 'error');
+        return false;
+    }
+
     setStatus('rulesStatus', 'Regeln geladen.', 'info');
     return true;
 }
 
 async function saveRulesEditor() {
-    const content = document.getElementById('rulesEditor').value;
+    let content;
+    try {
+        content = JSON.stringify(serializeRulesManager(), null, 4);
+    } catch (error) {
+        setStatus('rulesStatus', error.message || String(error), 'error');
+        return false;
+    }
+
     const response = await backendCall('saveRulesContent', content);
     if (!response.success) {
         setStatus('rulesStatus', response.error, 'error');
         return false;
     }
 
-    state.rulesDirty = false;
+    markRulesDirty(false);
     setStatus('rulesStatus', response.message, 'success');
     return true;
+}
+
+function setUploadCategoryValidation(message = '') {
+    const element = document.getElementById('uploadCategoryValidation');
+    if (!element) {
+        return;
+    }
+    element.textContent = message;
+    element.classList.toggle('hidden', !message);
+    document.getElementById('uploadCategoryInput').classList.toggle('input-error', Boolean(message));
+    state.customSelects.uploadCategorySelect?.root.classList.toggle('has-error', Boolean(message));
+}
+
+function updateUploadProgressDisplay(progress = null) {
+    const safeProgress = progress || { reviewed: 0, remaining: 0, autoResolved: 0, totalTransactions: 0 };
+    const total = Math.max(safeProgress.totalTransactions || 0, 1);
+    const completed = (safeProgress.reviewed || 0) + (safeProgress.autoResolved || 0);
+    const percentage = Math.round((completed / total) * 100);
+
+    document.getElementById('uploadReviewedCount').textContent = String(safeProgress.reviewed || 0);
+    document.getElementById('uploadAutoResolvedCount').textContent = String(safeProgress.autoResolved || 0);
+    document.getElementById('uploadRemainingCount').textContent = String(safeProgress.remaining || 0);
+    document.getElementById('uploadProgressBar').style.width = `${percentage}%`;
+}
+
+function getUploadRuleLabel(value) {
+    const options = state.customSelects.uploadRulesetSelect?.options || [];
+    return options.find((option) => option.value === value)?.label || value || 'Keine Regel';
+}
+
+function updateUploadDecisionPreview() {
+    const selectedCategory = getCustomSelectValue('uploadCategorySelect');
+    const newCategory = document.getElementById('uploadCategoryInput').value.trim();
+    const effectiveCategory = newCategory || selectedCategory || state.uploadStep?.defaultCategory || 'Noch keine Kategorie gewählt';
+    const selectedRule = getCustomSelectValue('uploadRulesetSelect') || state.uploadStep?.selectedRule || '';
+    const readableRule = getUploadRuleLabel(selectedRule);
+    const effectText = selectedRule
+        ? `Beim Speichern wird ${effectiveCategory} mit der Regel ${readableRule} für künftige ähnliche Buchungen verwendet.`
+        : `Beim Speichern wird ${effectiveCategory} nur für diese Transaktion übernommen.`;
+
+    document.getElementById('uploadDecisionPreviewCategory').textContent = effectiveCategory;
+    document.getElementById('uploadDecisionPreviewText').textContent = effectText;
+    document.getElementById('reviewRulePreview').textContent = readableRule;
+}
+
+function syncUploadCategoryMode() {
+    const customCategoryValue = document.getElementById('uploadCategoryInput').value.trim();
+    const hasCustomCategory = Boolean(customCategoryValue);
+    setCustomSelectDisabled('uploadCategorySelect', hasCustomCategory);
+    if (hasCustomCategory) {
+        setCustomSelectValue('uploadCategorySelect', '');
+    } else if (!getCustomSelectValue('uploadCategorySelect') && state.uploadStep?.defaultCategory) {
+        setCustomSelectValue('uploadCategorySelect', state.uploadStep.defaultCategory);
+    }
+    setUploadCategoryValidation('');
+    updateUploadDecisionPreview();
+}
+
+function validateUploadDecision() {
+    const customCategoryValue = document.getElementById('uploadCategoryInput').value.trim();
+    const selectedCategoryValue = getCustomSelectValue('uploadCategorySelect');
+    const categoryValue = customCategoryValue || selectedCategoryValue;
+
+    if (!categoryValue) {
+        setUploadCategoryValidation('Bitte wähle eine bestehende Kategorie oder lege eine neue Kategorie an.');
+        if (customCategoryValue) {
+            document.getElementById('uploadCategoryInput').focus();
+        } else {
+            state.customSelects.uploadCategorySelect?.trigger.focus();
+        }
+        return null;
+    }
+
+    setUploadCategoryValidation('');
+    return {
+        categoryValue,
+        rulesetValue: getCustomSelectValue('uploadRulesetSelect') || state.uploadStep?.selectedRule || '',
+    };
+}
+
+function renderUploadCompletion(response) {
+    document.getElementById('uploadCompletionCard').classList.remove('hidden');
+    document.getElementById('uploadCompletionFilename').textContent = response.filename || '–';
+    document.getElementById('uploadCompletionTransactions').textContent = String(response.transactionCount || 0);
+    document.getElementById('uploadCompletionAutoResolved').textContent = String(response.progress?.autoResolved || 0);
+    document.getElementById('uploadCompletionReviewed').textContent = String(response.progress?.reviewed || 0);
+    document.getElementById('uploadCompletionSummary').textContent = `${response.transactionCount || 0} Transaktionen verarbeitet. Die Datei ${response.filename || ''} steht jetzt in uploads bereit.`.trim();
 }
 
 function resetUploadWorkflowState() {
@@ -1026,12 +1878,23 @@ function resetUploadWorkflowState() {
     state.uploadStep = null;
     document.getElementById('uploadSourceName').textContent = 'Noch keine Datei gewählt';
     document.getElementById('uploadProgressPill').textContent = 'Bereit';
+    updateUploadProgressDisplay();
     document.getElementById('uploadEmptyState').classList.remove('hidden');
+    document.getElementById('uploadCompletionCard').classList.add('hidden');
     document.getElementById('uploadWorkflowCard').classList.add('hidden');
     document.getElementById('uploadWorkflowSummary').textContent = '';
     setCustomSelectOptions('uploadCategorySelect', [{ value: '', label: 'Bestehende Kategorie auswählen' }], '');
     document.getElementById('uploadCategoryInput').value = '';
-    setCustomSelectOptions('uploadRulesetSelect', [], '');
+    setCustomSelectOptions('uploadRulesetSelect', [{ value: '', label: 'Regelname auswählen' }], '');
+    setCustomSelectDisabled('uploadCategorySelect', false);
+    setUploadCategoryValidation('');
+    document.getElementById('reviewSuggestedCategory').textContent = '–';
+    document.getElementById('reviewSuggestionSource').textContent = '';
+    document.getElementById('reviewSuggestionConfidence').textContent = '–';
+    document.getElementById('reviewSuggestionDetail').textContent = '';
+    document.getElementById('uploadDecisionPreviewCategory').textContent = 'Noch keine Kategorie gewählt';
+    document.getElementById('uploadDecisionPreviewText').textContent = 'Wähle zuerst eine Kategorie und einen Regelvorschlag aus.';
+    document.getElementById('reviewRulePreview').textContent = 'Keine Regel';
 }
 
 function renderUploadStep(step) {
@@ -1041,28 +1904,38 @@ function renderUploadStep(step) {
 
     document.getElementById('uploadSourceName').textContent = step.sourceName;
     document.getElementById('uploadProgressPill').textContent = `${step.progress.remaining} offen`;
-    document.getElementById('uploadWorkflowSummary').textContent = `${step.progress.autoResolved} Transaktionen wurden automatisch zugeordnet, ${step.progress.reviewed} manuell bearbeitet, ${step.progress.remaining} Fälle sind aktuell noch offen.`;
+    updateUploadProgressDisplay(step.progress);
+    document.getElementById('uploadWorkflowSummary').textContent = `${step.progressSummary?.completedSteps || 0} von ${step.progressSummary?.totalSteps || step.progress.totalTransactions} Transaktionen sind bereits erledigt. Prüfe jetzt den nächsten offenen Fall.`;
 
     document.getElementById('reviewBookingDate').textContent = step.transaction.buchungstag || '–';
     document.getElementById('reviewAmount').textContent = formatCurrency(step.transaction.betrag || 0);
     document.getElementById('reviewSuggestedCategory').textContent = step.defaultCategory || 'Sonstiges';
+    document.getElementById('reviewSuggestionSource').textContent = step.suggestionSource || 'Vorschlag';
+    document.getElementById('reviewSuggestionConfidence').textContent = `Sicherheit: ${step.suggestionConfidence || 'niedrig'}`;
+    document.getElementById('reviewSuggestionDetail').textContent = step.suggestionDetail || '';
     document.getElementById('reviewDebitor').textContent = step.transaction.debitor || 'Kein Debitor/Kreditor vorhanden';
     document.getElementById('reviewBookingText').textContent = step.transaction.buchungstext || '–';
     document.getElementById('reviewPurpose').textContent = step.transaction.verwendungszweck || '–';
     document.getElementById('reviewText').textContent = step.transaction.text || '–';
 
+    const categoryOptions = [...new Set([step.defaultCategory, ...(step.categoryOptions || [])].filter(Boolean))]
+        .sort((left, right) => left.localeCompare(right, 'de'));
     setCustomSelectOptions(
         'uploadCategorySelect',
-        [{ value: '', label: 'Bestehende Kategorie auswählen' }, ...(step.categoryOptions || []).map((category) => ({ value: category, label: category }))],
-        '',
+        [{ value: '', label: 'Bestehende Kategorie auswählen' }, ...categoryOptions.map((category) => ({ value: category, label: category }))],
+        step.defaultCategory || '',
     );
 
     const categoryInput = document.getElementById('uploadCategoryInput');
     categoryInput.value = '';
 
-    setCustomSelectOptions('uploadRulesetSelect', step.ruleOptions || [], step.selectedRule || '');
+    setCustomSelectOptions('uploadRulesetSelect', step.ruleOptions || [{ value: '', label: 'Keine Regel speichern' }], step.selectedRule || '');
+    setCustomSelectDisabled('uploadCategorySelect', false);
+    setUploadCategoryValidation('');
+    updateUploadDecisionPreview();
 
     document.getElementById('uploadEmptyState').classList.add('hidden');
+    document.getElementById('uploadCompletionCard').classList.add('hidden');
     document.getElementById('uploadWorkflowCard').classList.remove('hidden');
 }
 
@@ -1076,13 +1949,18 @@ async function handleUploadWorkflowResponse(response) {
         resetUploadWorkflowState();
         document.getElementById('uploadSourceName').textContent = response.sourceName || 'Verarbeitung abgeschlossen';
         document.getElementById('uploadProgressPill').textContent = 'Abgeschlossen';
+        updateUploadProgressDisplay(response.progress);
+        renderUploadCompletion(response);
         setStatus('uploadStatus', response.message, 'success');
         await refreshAllData(response.filename || null);
         return;
     }
 
     renderUploadStep(response);
-    setStatus('uploadStatus', `Noch ${response.progress.remaining} manuell zu prüfende Transaktionen. Änderungen an Regeln wurden bereits neu auf offene Fälle angewendet.`, 'info');
+    const autoResolvedMessage = response.newlyAutoResolvedCount
+        ? ` Durch deine letzte Entscheidung wurden ${response.newlyAutoResolvedCount} weitere Transaktionen automatisch erkannt.`
+        : '';
+    setStatus('uploadStatus', `Noch ${response.progress.remaining} manuell zu prüfende Transaktionen.${autoResolvedMessage}`, 'info');
 }
 
 async function startCategorizerUpload() {
@@ -1094,9 +1972,14 @@ async function startCategorizerUpload() {
         return;
     }
 
-    setActiveView('categorizer');
+    await setActiveView('categorizer');
+    if (state.currentView !== 'categorizer') {
+        return;
+    }
+    resetUploadWorkflowState();
     document.getElementById('uploadSourceName').textContent = selected.name;
     document.getElementById('uploadProgressPill').textContent = 'Lädt';
+    updateUploadProgressDisplay({ reviewed: 0, remaining: 0, autoResolved: 0, totalTransactions: 1 });
     setStatus('uploadStatus', `${selected.name} wird analysiert.`, 'info');
 
     const response = await backendCall('startCategorizerUpload', selected.path);
@@ -1109,11 +1992,12 @@ async function submitUploadDecision() {
         return;
     }
 
-    const customCategoryValue = document.getElementById('uploadCategoryInput').value.trim();
-    const selectedCategoryValue = getCustomSelectValue('uploadCategorySelect');
-    const categoryValue = customCategoryValue || selectedCategoryValue;
-    const rulesetValue = getCustomSelectValue('uploadRulesetSelect');
-    const response = await backendCall('submitCategorizerDecision', state.uploadSessionId, categoryValue, rulesetValue);
+    const validation = validateUploadDecision();
+    if (!validation) {
+        return;
+    }
+
+    const response = await backendCall('submitCategorizerDecision', state.uploadSessionId, validation.categoryValue, validation.rulesetValue);
     await handleUploadWorkflowResponse(response);
 }
 
@@ -1131,9 +2015,11 @@ async function cancelUploadWorkflow() {
 async function refreshAllData(preferredFile = state.selectedFile) {
     state.files = await backendCall('listFiles');
     state.transactions = normalizeTransactions(state.files);
+    state.rulesManager.hitIndex = buildRuleHitIndex(state.files);
     updateMetrics();
     populateCategoryFilter();
     renderFileList();
+    renderRulesTable();
     scheduleDashboardRefresh();
 
     if (preferredFile) {
@@ -1146,7 +2032,8 @@ async function refreshAllData(preferredFile = state.selectedFile) {
 
     if (!state.selectedFile) {
         document.getElementById('fileEditor').value = '';
-        document.getElementById('editorTitle').textContent = 'JSON-Inhalt';
+        state.selectedFileContent = '';
+        markEditorDirty(false);
     }
 }
 
@@ -1158,20 +2045,37 @@ function resetFilters() {
     document.getElementById('dateEndFilter').value = '';
     state.hiddenCategories.expenses.clear();
     state.hiddenCategories.income.clear();
+    resetTransactionPagination();
     refreshDashboard();
 }
 
 function bindEvents() {
     document.querySelectorAll('.view-nav-button').forEach((button) => {
-        button.addEventListener('click', () => setActiveView(button.dataset.view));
+        button.addEventListener('click', async () => setActiveView(button.dataset.view));
     });
 
     ['filterInput', 'amountFilter', 'dateStartFilter', 'dateEndFilter'].forEach((id) => {
         const element = document.getElementById(id);
-        element.addEventListener('input', refreshDashboard);
-        element.addEventListener('change', refreshDashboard);
+        element.addEventListener('input', () => {
+            resetTransactionPagination();
+            refreshDashboard();
+        });
+        element.addEventListener('change', () => {
+            resetTransactionPagination();
+            refreshDashboard();
+        });
     });
-    document.getElementById('categoryFilter').addEventListener('change', refreshDashboard);
+    document.getElementById('categoryFilter').addEventListener('change', () => {
+        resetTransactionPagination();
+        refreshDashboard();
+    });
+
+    document.getElementById('transactionsPageSize').addEventListener('change', (event) => {
+        const nextValue = Number(event.target.value);
+        state.transactionPagination.pageSize = [50, 100, 200].includes(nextValue) ? nextValue : 50;
+        resetTransactionPagination();
+        refreshDashboard();
+    });
 
     document.getElementById('resetFiltersButton').addEventListener('click', resetFilters);
 
@@ -1191,12 +2095,84 @@ function bindEvents() {
     document.getElementById('startCategorizerUploadButton').addEventListener('click', startCategorizerUpload);
     document.getElementById('submitUploadDecisionButton').addEventListener('click', submitUploadDecision);
     document.getElementById('cancelUploadWorkflowButton').addEventListener('click', cancelUploadWorkflow);
-    document.getElementById('reloadRulesButton').addEventListener('click', loadRulesEditor);
+    document.getElementById('goToDashboardButton').addEventListener('click', async () => setActiveView('dashboard'));
+    document.getElementById('openUploadsFolderFromCompletionButton').addEventListener('click', () => openStorageFolder('openUploadsFolder', 'uploadStatus', 'Uploads-Ordner geöffnet'));
+    document.getElementById('reloadRulesButton').addEventListener('click', async () => {
+        if (state.rulesDirty) {
+            const action = await confirmUnsavedChanges('rules');
+            if (action === 'cancel') {
+                return;
+            }
+            if (action === 'save') {
+                const saved = await saveRulesEditor();
+                if (!saved) {
+                    return;
+                }
+            }
+        }
+        await loadRulesEditor();
+    });
     document.getElementById('saveRulesButton').addEventListener('click', saveRulesEditor);
     document.getElementById('openRulesFolderButton').addEventListener('click', () => openStorageFolder('openRulesFolder', 'rulesStatus', 'Regelordner geöffnet'));
     document.getElementById('openDataFolderFromRulesButton').addEventListener('click', () => openStorageFolder('openDataFolder', 'rulesStatus', 'Datenordner geöffnet'));
-    document.getElementById('rulesEditor').addEventListener('input', () => {
-        state.rulesDirty = true;
+    document.getElementById('rulesSearchInput').addEventListener('input', (event) => {
+        state.rulesManager.search = event.target.value;
+        renderRulesTable();
+    });
+    document.getElementById('applyBulkCategoryButton').addEventListener('click', applyBulkRuleCategory);
+    document.getElementById('addRuleRowButton').addEventListener('click', () => addRuleEntry('', ''));
+    document.getElementById('rulesSelectAllCheckbox').addEventListener('change', (event) => {
+        const visibleIds = getFilteredRulesEntries().map((entry) => entry.id);
+        if (event.target.checked) {
+            visibleIds.forEach((id) => state.rulesManager.selectedIds.add(id));
+        } else {
+            visibleIds.forEach((id) => state.rulesManager.selectedIds.delete(id));
+        }
+        renderRulesTable();
+    });
+    document.querySelectorAll('th[data-rules-sort-column]').forEach((header) => {
+        header.addEventListener('click', () => {
+            const column = header.dataset.rulesSortColumn;
+            if (state.rulesManager.sortColumn === column) {
+                state.rulesManager.sortDirection *= -1;
+            } else {
+                state.rulesManager.sortColumn = column;
+                state.rulesManager.sortDirection = column === 'hits' || column === 'duplicate' ? -1 : 1;
+            }
+            renderRulesTable();
+        });
+    });
+    document.getElementById('rulesTableBody').addEventListener('input', (event) => {
+        const field = event.target.dataset.ruleField;
+        const entryId = Number(event.target.dataset.ruleId);
+        if (!field || !entryId) {
+            return;
+        }
+        setRuleEntryValue(entryId, field, event.target.value, false);
+    });
+    document.getElementById('rulesTableBody').addEventListener('change', (event) => {
+        const field = event.target.dataset.ruleField;
+        const entryId = Number(event.target.dataset.ruleId);
+        if (field && entryId) {
+            setRuleEntryValue(entryId, field, event.target.value, true);
+            return;
+        }
+        if (event.target.dataset.ruleSelect) {
+            const entryId = Number(event.target.dataset.ruleSelect);
+            if (event.target.checked) {
+                state.rulesManager.selectedIds.add(entryId);
+            } else {
+                state.rulesManager.selectedIds.delete(entryId);
+            }
+            renderRulesTable();
+        }
+    });
+    document.getElementById('rulesTableBody').addEventListener('click', (event) => {
+        const deleteId = Number(event.target.dataset.ruleDelete);
+        if (!deleteId) {
+            return;
+        }
+        deleteRuleEntry(deleteId);
     });
 
     document.getElementById('uploadFileButton').addEventListener('click', uploadFile);
@@ -1206,8 +2182,17 @@ function bindEvents() {
     document.getElementById('openDataFolderFromFilesButton').addEventListener('click', () => openStorageFolder('openDataFolder', 'fileStatus', 'Datenordner geöffnet'));
     document.getElementById('saveFileButton').addEventListener('click', saveCurrentFile);
     document.getElementById('fileEditor').addEventListener('input', () => {
-        state.editorDirty = true;
+        markEditorDirty(document.getElementById('fileEditor').value !== state.selectedFileContent);
     });
+    document.getElementById('uploadCategoryInput').addEventListener('input', syncUploadCategoryMode);
+    document.getElementById('uploadCategorySelect').addEventListener('change', () => {
+        if (getCustomSelectValue('uploadCategorySelect')) {
+            document.getElementById('uploadCategoryInput').value = '';
+        }
+        setUploadCategoryValidation('');
+        updateUploadDecisionPreview();
+    });
+    document.getElementById('uploadRulesetSelect').addEventListener('change', updateUploadDecisionPreview);
 
     window.addEventListener('resize', () => {
         scheduleDashboardRefresh(false);
@@ -1217,11 +2202,12 @@ function bindEvents() {
 document.addEventListener('DOMContentLoaded', () => {
     new QWebChannel(qt.webChannelTransport, async (channel) => {
         window.backend = channel.objects.backend;
+        initializeModal();
         initializeCustomSelects();
         initializeDatePickers();
         bindEvents();
         resetUploadWorkflowState();
-        setActiveView('dashboard');
+        await setActiveView('dashboard');
         await loadStorageInfo();
         await refreshAllData();
         await loadRulesEditor();

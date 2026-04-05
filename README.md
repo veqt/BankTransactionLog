@@ -9,7 +9,7 @@ Mit mehr Import-Daten wächst die Regelliste und beschleunigt dadurch den Import
 
 | Release | Datei | Kompatibilität | Download |
 | --- | --- | --- | --- |
-| `v1.0` | `Geldstrom_Portable_v1.0.zip` | Sparkasse - Excel (CSV-CAMT V8) | [Herunterladen](https://github.com/veqt/BankTransactionLog/releases/download/v1.0/Geldstrom_Portable_v1.0.zip) |
+| `v1.1` | `Geldstrom_Portable_v1.1.zip` | Sparkasse - Excel (CSV-CAMT V8) | [Herunterladen](https://github.com/veqt/BankTransactionLog/releases/download/v1.1/Geldstrom_Portable_v1.1.zip) |
 
 ## Bedienung
 
